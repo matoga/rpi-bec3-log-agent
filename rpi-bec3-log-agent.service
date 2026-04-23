@@ -1,0 +1,18 @@
+[Unit]
+Description=BEC3 RPi Log Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/home/admin/rpi-bec3-log-agent
+ExecStart=/usr/bin/python3 /home/admin/rpi-bec3-log-agent/agent.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rpi-bec3-log-agent
+
+[Install]
+WantedBy=multi-user.target

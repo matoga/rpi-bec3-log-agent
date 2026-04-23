@@ -1,0 +1,8 @@
+[agent]
+server_url     = "https://bec3-lab-logger.<your name>.workers.dev/logs"
+api_key        = "your-api-key-here"
+instrument_id  = "rpi_env"
+period_seconds = 60.0
+
+[sensors.dht22]
+pin = 5
