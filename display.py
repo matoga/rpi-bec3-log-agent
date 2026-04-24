@@ -36,9 +36,11 @@ class Display:
         light = readings.get("light_raw")
 
         parts = []
-        if _ok(humi):  parts.append(f"H:{round(humi):02d}")
-        if _ok(temp):  parts.append(f"T:{temp:.1f}")
-        if _ok(light): parts.append("L")
+        if _ok(humi):  parts.append(f"H{round(humi):02d}")
+        if _ok(temp):  parts.append(f"T{temp:.1f}")
+        if _ok(light):
+            scaled = min(99, int(float(light) * 99 / 1023))
+            parts.append(f"L{scaled:02d}")
 
         if ok:
             line1 = f"{ts} Success"
