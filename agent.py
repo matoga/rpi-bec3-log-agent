@@ -116,11 +116,15 @@ def main():
             display.update(ts, ok, readings, err)
 
         deadline = time.monotonic() + cfg["period"]
+        next_tick = time.monotonic() + 1.0
         while running and time.monotonic() < deadline:
             if button and button.is_set():
                 button.clear()
                 log.info("Button pressed — force refresh")
                 break
+            if display and time.monotonic() >= next_tick:
+                display.tick()
+                next_tick += 1.0
             time.sleep(0.1)
 
     if gpio_cleanup:

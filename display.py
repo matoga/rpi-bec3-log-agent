@@ -27,6 +27,16 @@ class Display:
         self._tick = 0
         log.info("LCD display ready")
 
+    def tick(self):
+        """Advance the spinner one step — call every second during idle."""
+        spin = _SPIN[self._tick % 4]
+        self._tick += 1
+        try:
+            self._lcd.setCursor(0, 15)
+            self._lcd.write(spin)
+        except Exception as e:
+            log.warning("[lcd] tick error: %s", e)
+
     def _rgb(self, r, g, b):
         self._bus.write_byte_data(_RGB_ADDR, 0x06, r)
         self._bus.write_byte_data(_RGB_ADDR, 0x07, g)
