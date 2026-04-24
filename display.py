@@ -66,6 +66,14 @@ class Display:
         except Exception as e:
             log.warning("[lcd] tick error: %s", e)
 
+    def working(self):
+        """Show X at position 15 while reading sensors / posting."""
+        try:
+            self._bus.write_byte_data(_LCD_ADDR, 0x00, 0x80 | 0x0F)
+            self._bus.write_byte_data(_LCD_ADDR, 0x40, ord('X'))
+        except Exception as e:
+            log.warning("[lcd] working error: %s", e)
+
     def update(self, ts: str, ok: bool, readings: dict, err=None):
         humi  = readings.get("humidity_pct")
         temp  = readings.get("temperature_c")

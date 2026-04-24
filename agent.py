@@ -97,6 +97,9 @@ def main():
     signal.signal(signal.SIGTERM, _stop)
 
     while running:
+        if display:
+            display.working()
+
         readings = {}
         for s in sensors:
             data = s.read()
