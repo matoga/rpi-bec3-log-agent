@@ -60,10 +60,10 @@ class LightSensor(Sensor):
 class PicoScope(Sensor):
     """PicoScope 2204A USB oscilloscope — ps2000 driver.
 
-    A background thread streams Channel A (or configured channel) continuously.
-    On read(), the accumulated ADC samples are snapshotted, stats are computed,
-    the mV waveform is zlib-compressed and base64-encoded, then streaming is
-    restarted immediately so the next period begins with minimal gap.
+    Configures the device in continuous legacy streaming mode (windowed=1).
+    On read(), ps2000_get_values is called to synchronously grab a snapshot 
+    of the most recent samples. Stats are computed and the waveform is 
+    zlib-compressed and base64-encoded.
     """
 
     # mV integer → PS2000_VOLTAGE_RANGE key
