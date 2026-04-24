@@ -58,7 +58,7 @@ class LightSensor(Sensor):
 
 
 class PicoScope(Sensor):
-    """PicoScope 2204A USB oscilloscope — ps2000a driver.
+    """PicoScope 2204A USB oscilloscope — ps2000 driver.
 
     A background thread streams Channel A (or configured channel) continuously.
     On read(), the accumulated ADC samples are snapshotted, stats are computed,
@@ -66,18 +66,18 @@ class PicoScope(Sensor):
     restarted immediately so the next period begins with minimal gap.
     """
 
-    # mV integer → ps2000a range key
+    # mV integer → ps2000 range key
     _RANGE_KEY = {
-        10: "PS2000A_10MV",  20: "PS2000A_20MV",  50: "PS2000A_50MV",
-        100: "PS2000A_100MV", 200: "PS2000A_200MV", 500: "PS2000A_500MV",
-        1000: "PS2000A_1V",  2000: "PS2000A_2V",  5000: "PS2000A_5V",
-        10000: "PS2000A_10V", 20000: "PS2000A_20V",
+        10: "PS2000_10MV",  20: "PS2000_20MV",  50: "PS2000_50MV",
+        100: "PS2000_100MV", 200: "PS2000_200MV", 500: "PS2000_500MV",
+        1000: "PS2000_1V",  2000: "PS2000_2V",  5000: "PS2000_5V",
+        10000: "PS2000_10V", 20000: "PS2000_20V",
     }
 
     def __init__(self, channel: str = "A", range_mv: int = 100,
                  coupling: str = "DC", sample_rate_hz: int = 10_000):
         import ctypes
-        from picosdk.ps2000a import ps2000a as ps
+        from picosdk.ps2000 import ps2000 as ps  # ps2000 (not ps2000a) for 2204A
         from picosdk.functions import adc2mV
 
         self._ctypes       = ctypes
@@ -114,65 +114,70 @@ class PicoScope(Sensor):
     # ------------------------------------------------------------------ helpers
 
     def _ch_enum(self):
-        return self._ps.PS2000A_CHANNEL[f"PS2000A_CHANNEL_{self._channel_str}"]
+        return self._ps.PS2000_CHANNEL[f"PS2000_CHANNEL_{self._channel_str}"]  # ps2000 enum
 
     def _open_and_start(self):
         ctypes, ps = self._ctypes, self._ps
-        ret = ps.ps2000aOpenUnit(ctypes.byref(self._chandle), None)
-        # 0 = PICO_OK; 282 = USB3 device on USB2 port (warning, still works)
-        if ret not in (0, 282):
-            raise RuntimeError(f"ps2000aOpenUnit returned {ret}")
 
-        ps.ps2000aMaximumValue(self._chandle, ctypes.byref(self._max_adc))
+        # First call uploads firmware; device re-enumerates, handle will be 0
+        ps.ps2000_open_unit()
+        time.sleep(2)  # wait for firmware upload + re-enumeration
 
-        coupling_val = ps.PS2000A_COUPLING[f"PS2000A_{self._coupling}"]
-        range_key    = self._RANGE_KEY.get(self._range_mv, "PS2000A_100MV")
-        self._channel_range = ps.PS2000A_RANGE[range_key]
+        # Second call actually opens the unit
+        handle = ps.ps2000_open_unit()
+        if handle <= 0:
+            raise RuntimeError(f"ps2000_open_unit failed, handle={handle}")
+        self._chandle = ctypes.c_int16(handle)
 
-        ps.ps2000aSetChannel(
+        self._max_adc = ctypes.c_int16(32767)  # ps2000 fixed max ADC value
+
+        # SDK exposes coupling as PICO_COUPLING with plain 'AC'/'DC' keys (bool-style)
+        coupling_val = ps.PICO_COUPLING[self._coupling]
+        range_key    = self._RANGE_KEY.get(self._range_mv, "PS2000_100MV")
+        self._channel_range = ps.PS2000_VOLTAGE_RANGE[range_key]
+
+        ps.ps2000_set_channel(
             self._chandle, self._ch_enum(),
-            1, coupling_val, self._channel_range, 0.0,
+            1, coupling_val, self._channel_range,
         )
 
         self._drv_buf = np.zeros(self._buf_size, dtype=np.int16)
-        self._register_buffer()
+        # No ps2000_set_data_buffer — streaming callback receives buffer pointers directly
         self._start_streaming()
 
-    def _register_buffer(self):
-        ps, ctypes = self._ps, self._ctypes
-        ps.ps2000aSetDataBuffers(
-            self._chandle, self._ch_enum(),
-            self._drv_buf.ctypes.data_as(ctypes.POINTER(ctypes.c_int16)),
-            None, self._buf_size, 0,
-            ps.PS2000A_RATIO_MODE["PS2000A_RATIO_MODE_NONE"],
-        )
+    # _register_buffer intentionally absent: ps2000 streaming delivers buffer
+    # pointers via the GetOverviewBuffersType callback; no separate registration needed.
 
     def _start_streaming(self):
         ps, ctypes = self._ps, self._ctypes
-        interval_us = ctypes.c_int32(max(1, 1_000_000 // self._sample_rate_hz))
-        ps.ps2000aRunStreaming(
+        ps.ps2000_run_streaming_ns(
             self._chandle,
-            ctypes.byref(interval_us),
-            ps.PS2000A_TIME_UNITS["PS2000A_US"],
-            0,             # maxPreTriggerSamples
-            2_000_000_000, # maxPostTriggerSamples (huge; autoStop=0)
-            0,             # autoStop = 0 → run forever
-            1,             # downSampleRatio
-            ps.PS2000A_RATIO_MODE["PS2000A_RATIO_MODE_NONE"],
+            max(100, 1_000_000_000 // self._sample_rate_hz),  # sample interval in ns
+            ps.PS2000_TIME_UNITS["PS2000_NS"],
+            self._buf_size,
+            0,   # autoStop = 0 → run forever
+            1,   # downSampleRatio
             self._buf_size,
         )
         self._streaming = True
 
     def _make_callback(self):
-        drv_buf = self._drv_buf
-        chunks  = self._chunks
+        import ctypes
+        chunks = self._chunks
+        buf_size = self._buf_size
 
-        def _cb(handle, n_samples, start_idx, overflow,
-                trigger_at, triggered, auto_stop, param):
-            if n_samples > 0:
-                chunks.append(drv_buf[start_idx:start_idx + n_samples].copy())
+        # Signature from SDK: (int16_t **overviewBuffers, int16_t overflow,
+        #                       uint32_t triggerAt, int16_t triggered,
+        #                       int16_t autoStop, uint32_t nValues)
+        def _cb(overview_buffers, overflow, trigger_at, triggered, auto_stop, n_values):
+            if n_values > 0 and overview_buffers:
+                # overview_buffers[0] is the channel A max buffer pointer
+                buf_ptr = overview_buffers[0]
+                if buf_ptr:
+                    n = min(int(n_values), buf_size)
+                    chunks.append(np.ctypeslib.as_array(buf_ptr, shape=(n,)).copy())
 
-        return self._ps.StreamingReadyType(_cb)
+        return self._ps.GetOverviewBuffersType(_cb)  # correct callback factory name
 
     # ---------------------------------------------------------- background thread
 
@@ -182,8 +187,8 @@ class PicoScope(Sensor):
             try:
                 if self._streaming:
                     with self._api_lock:
-                        ps.ps2000aGetStreamingLatestValues(
-                            self._chandle, self._cFuncPtr, None
+                        ps.ps2000_get_streaming_last_values(
+                            self._chandle, self._cFuncPtr
                         )
                 time.sleep(0.01)
             except Exception as e:
@@ -202,11 +207,10 @@ class PicoScope(Sensor):
             # --- stop streaming and grab the accumulated chunks atomically ---
             self._streaming = False          # signal bg thread to stop polling
             with self._api_lock:             # wait for any in-flight poll to finish
-                ps.ps2000aStop(self._chandle)
+                ps.ps2000_stop(self._chandle)
                 chunks = list(self._chunks)
                 self._chunks.clear()
                 # Restart immediately so next period has no gap
-                self._register_buffer()
                 self._start_streaming()       # sets self._streaming = True
 
             if not chunks:
@@ -253,8 +257,8 @@ class PicoScope(Sensor):
         """Graceful shutdown — call on agent exit."""
         self._running = False
         try:
-            self._ps.ps2000aStop(self._chandle)
-            self._ps.ps2000aCloseUnit(self._chandle)
+            self._ps.ps2000_stop(self._chandle)
+            self._ps.ps2000_close_unit(self._chandle)
             log.info("[picoscope] closed")
         except Exception as e:
             log.warning("[picoscope] close error: %s", e)
