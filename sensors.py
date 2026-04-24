@@ -92,24 +92,11 @@ class PicoScope(Sensor):
         self._chandle      = ctypes.c_int16()
         self._max_adc      = ctypes.c_int16()
         self._channel_range = None
-        self._drv_buf      = None
-        self._buf_size     = 2000   # driver ring-buffer length (samples)
-
-        # Chunk list shared between bg thread and read(); protected by _api_lock
-        self._chunks: list  = []
-        self._streaming     = False
-        self._running       = True
-        # Held by bg thread while calling the SDK; acquired by read() to gate on it
-        self._api_lock = threading.Lock()
+        self._buf_size     = 2000   # number of samples to keep in rolling window
+        self._running      = True
 
         self._open_and_start()
-        self._cFuncPtr = self._make_callback()  # keep alive — never GC'd
-
-        self._thread = threading.Thread(
-            target=self._bg_thread, daemon=True, name="picoscope-bg"
-        )
-        self._thread.start()
-        log.info("PicoScope ch=%s range=%dmV coupling=%s rate=%dHz",
+        log.info("PicoScope ch=%s range=%dmV coupling=%s rate=%dHz (legacy windowed)",
                  self._channel_str, self._range_mv, self._coupling, self._sample_rate_hz)
 
     # ------------------------------------------------------------------ helpers
@@ -172,80 +159,17 @@ class PicoScope(Sensor):
             1, coupling_val, self._channel_range,
         )
 
-        self._drv_buf = np.zeros(self._buf_size, dtype=np.int16)
-        # No ps2000_set_data_buffer — streaming callback receives buffer pointers directly
-        self._start_streaming()
-
-    # _register_buffer intentionally absent: ps2000 streaming delivers buffer
-    # pointers via the GetOverviewBuffersType callback; no separate registration needed.
-
-    def _start_streaming(self):
-        ps, ctypes = self._ps, self._ctypes
-        # PS2000_NS = 2 by position in make_enum([FS,PS,NS,...])
-        # Use getattr fallback so older picosdk installs (without PS2000_TIME_UNITS) work
-        _time_units = getattr(ps, "PS2000_TIME_UNITS", {}).get("PS2000_NS", 2)
-        interval_ns = max(100, 1_000_000_000 // self._sample_rate_hz)
-        log.debug("[picoscope] run_streaming_ns interval=%dns time_units=%d buf=%d",
-                  interval_ns, _time_units, self._buf_size)
-        ps.ps2000_run_streaming_ns(
+        # Legacy streaming: interval_ms, max_samples, windowed=1 (continuous)
+        interval_ms = max(1, 1000 // self._sample_rate_hz)
+        log.debug("[picoscope] run_streaming interval=%dms max_samples=%d",
+                  interval_ms, self._buf_size)
+        
+        ps.ps2000_run_streaming(
             self._chandle,
-            interval_ns,
-            _time_units,
+            interval_ms,
             self._buf_size,
-            0,   # autoStop = 0 → run forever
-            1,   # downSampleRatio
-            self._buf_size,
+            1,  # windowed = 1
         )
-        self._streaming = True
-
-    def _make_callback(self):
-        import ctypes
-        chunks = self._chunks
-        buf_size = self._buf_size
-
-        # Signature from SDK: (int16_t **overviewBuffers, int16_t overflow,
-        #                       uint32_t triggerAt, int16_t triggered,
-        #                       int16_t autoStop, uint32_t nValues)
-        def _cb(overview_buffers, overflow, trigger_at, triggered, auto_stop, n_values):
-            if n_values > 0 and overview_buffers:
-                # overview_buffers[0] is the channel A max buffer pointer
-                buf_ptr = overview_buffers[0]
-                if buf_ptr:
-                    n = min(int(n_values), buf_size)
-                    chunks.append(np.ctypeslib.as_array(buf_ptr, shape=(n,)).copy())
-
-        # GetOverviewBuffersType added in newer picosdk; fall back to manual ctypes factory
-        cb_factory = getattr(self._ps, "GetOverviewBuffersType", None)
-        if cb_factory is None:
-            from picosdk.ctypes_wrapper import C_CALLBACK_FUNCTION_FACTORY
-            from ctypes import POINTER, c_int16, c_uint32
-            cb_factory = C_CALLBACK_FUNCTION_FACTORY(
-                None,
-                POINTER(POINTER(c_int16)),  # overviewBuffers
-                c_int16,                    # overflow
-                c_uint32,                   # triggerAt
-                c_int16,                    # triggered
-                c_int16,                    # autoStop
-                c_uint32,                   # nValues
-            )
-            log.debug("[picoscope] built GetOverviewBuffersType manually (old picosdk)")
-        return cb_factory(_cb)
-
-    # ---------------------------------------------------------- background thread
-
-    def _bg_thread(self):
-        ps = self._ps
-        while self._running:
-            try:
-                if self._streaming:
-                    with self._api_lock:
-                        ps.ps2000_get_streaming_last_values(
-                            self._chandle, self._cFuncPtr
-                        )
-                time.sleep(0.01)
-            except Exception as e:
-                log.warning("[picoscope] poll error: %s", e)
-                time.sleep(0.5)
 
     # --------------------------------------------------------------- Sensor API
 
@@ -254,23 +178,27 @@ class PicoScope(Sensor):
 
     def read(self) -> dict:
         try:
-            ps = self._ps
+            ps, ctypes = self._ps, self._ctypes
+            
+            buf = (ctypes.c_int16 * self._buf_size)()
+            overflow = ctypes.c_int16(0)
 
-            # --- stop streaming and grab the accumulated chunks atomically ---
-            self._streaming = False          # signal bg thread to stop polling
-            with self._api_lock:             # wait for any in-flight poll to finish
-                ps.ps2000_stop(self._chandle)
-                chunks = list(self._chunks)
-                self._chunks.clear()
-                # Restart immediately so next period has no gap
-                self._start_streaming()       # sets self._streaming = True
+            n_values = ps.ps2000_get_values(
+                self._chandle,
+                ctypes.byref(buf),  # buffer_a
+                None,               # buffer_b
+                None,               # buffer_c
+                None,               # buffer_d
+                ctypes.byref(overflow),
+                self._buf_size
+            )
 
-            if not chunks:
-                log.warning("[picoscope] no samples collected this period")
+            if n_values <= 0:
+                log.warning("[picoscope] get_values returned %d", n_values)
                 return {}
 
             # --- ADC → mV conversion -----------------------------------------
-            raw_adc = np.concatenate(chunks)
+            raw_adc = np.ctypeslib.as_array(buf, shape=(n_values,)).copy()
             mv_arr  = np.array(
                 self._adc2mV(raw_adc, self._channel_range, self._max_adc),
                 dtype=np.float32,
