@@ -121,6 +121,13 @@ def main():
             else:
                 log.warning("[%s] no data", s.name)
 
+        # RPi internal CPU temperature (Linux thermal sysfs; silently absent on dev machines)
+        try:
+            raw = Path("/sys/class/thermal/thermal_zone0/temp").read_text().strip()
+            readings["rpi_cpu_temp_c"] = round(int(raw) / 1000.0, 1)
+        except Exception:
+            pass
+
         ts = time.strftime("%H:%M:%S")
         if readings:
             ok, err = post(cfg["server_url"], cfg["api_key"], cfg["instrument_id"], readings)
