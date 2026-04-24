@@ -156,6 +156,8 @@ def main():
     for s in sensors:
         if hasattr(s, "close"):
             s.close()
+    if display and hasattr(display, "close"):
+        display.close()
     log.info("Stopped.")
 
 

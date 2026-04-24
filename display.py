@@ -109,3 +109,11 @@ class Display:
             self._rgb(*color)
         except Exception as e:
             log.warning("[lcd] write error: %s", e)
+
+    def close(self):
+        """Turn off the display and backlight."""
+        try:
+            self._rgb(0, 0, 0)
+            self._lcd.clear()
+        except Exception as e:
+            log.warning("[lcd] close error: %s", e)
