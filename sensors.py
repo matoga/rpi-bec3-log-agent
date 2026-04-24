@@ -160,13 +160,13 @@ class PicoScope(Sensor):
         )
 
         # Legacy streaming: interval_ms, max_samples, windowed=1 (continuous)
-        interval_ms = max(1, 1000 // self._sample_rate_hz)
+        self._interval_ms = max(1, 1000 // self._sample_rate_hz)
         log.debug("[picoscope] run_streaming interval=%dms max_samples=%d",
-                  interval_ms, self._buf_size)
+                  self._interval_ms, self._buf_size)
         
         ps.ps2000_run_streaming(
             self._chandle,
-            interval_ms,
+            self._interval_ms,
             self._buf_size,
             1,  # windowed = 1
         )
@@ -220,13 +220,14 @@ class PicoScope(Sensor):
 
             return {
                 "picoscope_ch_a": {
-                    "n_samples":    int(mv_arr.size),
-                    "median_mv":    round(float(np.median(mv_arr)), 4),
-                    "mean_mv":      round(float(np.mean(mv_arr)),   4),
-                    "trim_mean_mv": round(trim_mean,                4),
-                    "trim_min_mv":  round(p5,                       4),
-                    "trim_max_mv":  round(p95,                      4),
-                    "samples_b64z": encoded,
+                    "n_samples":          int(mv_arr.size),
+                    "sample_interval_ms": int(self._interval_ms),
+                    "median_mv":          round(float(np.median(mv_arr)), 4),
+                    "mean_mv":            round(float(np.mean(mv_arr)),   4),
+                    "trim_mean_mv":       round(trim_mean,                4),
+                    "trim_min_mv":        round(p5,                       4),
+                    "trim_max_mv":        round(p95,                      4),
+                    "samples_b64z":       encoded,
                 }
             }
         except Exception as e:
