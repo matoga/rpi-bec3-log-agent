@@ -1,7 +1,7 @@
 # BEC3 RPi Log Agent
 
-Reads temperature and humidity from a DHT22 sensor (Grove port D5) and posts
-the data to a remote HTTP endpoint on a fixed interval.
+Reads temperature, humidity (DHT22), and light level (Grove Light Sensor) and posts
+the data to a remote HTTP endpoint on a fixed interval. Status is shown on a Grove LCD RGB Backlight display.
 
 ## Requirements
 
@@ -19,8 +19,8 @@ cd ~/rpi-bec3-log-agent
 # 2. Install seeed_dht (from grove.py repo, already cloned at ~/grove.py)
 cd ~/grove.py && sudo pip3 install . --break-system-packages && cd ~/rpi-bec3-log-agent
 
-# 3. Install requests
-pip3 install requests
+# 3. Install dependencies
+pip3 install requests smbus2
 
 # 4. Configure
 cp config/device.toml.example config/device.toml

@@ -2,7 +2,8 @@
 import logging, os, signal, sys, time, tomllib
 from pathlib import Path
 import requests
-from sensors import DHT22
+from sensors import DHT22, LightSensor
+from display import Display
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%dT%H:%M:%S")
 log = logging.getLogger(__name__)
@@ -30,6 +31,7 @@ def load_config():
 
 
 def post(server_url, api_key, instrument_id, readings):
+    """Returns (ok: bool, err_code: str | None)."""
     try:
         resp = requests.post(
             server_url,
@@ -39,12 +41,16 @@ def post(server_url, api_key, instrument_id, readings):
         )
         resp.raise_for_status()
         log.info("✓ HTTP %d  %s", resp.status_code, readings)
+        return True, None
     except requests.exceptions.HTTPError:
-        log.error("✗ HTTP %d: %s", resp.status_code, resp.text[:200])  # resp is always assigned before raise_for_status()
+        log.error("✗ HTTP %d: %s", resp.status_code, resp.text[:200])
+        return False, resp.status_code
     except requests.exceptions.ConnectionError as e:
         log.error("✗ Connection: %s", e)
+        return False, "CONN"
     except requests.exceptions.Timeout:
         log.error("✗ Timeout")
+        return False, "TOUT"
 
 
 def main():
@@ -53,7 +59,14 @@ def main():
     # to add a sensor: import its class from sensors.py, instantiate it here
     sensors = [
         DHT22(pin=cfg["sensors"].get("dht22", {}).get("pin", 5)),
+        LightSensor(channel=cfg["sensors"].get("light", {}).get("channel", 0)),
     ]
+
+    try:
+        display = Display()
+    except Exception as e:
+        log.warning("LCD display unavailable: %s", e)
+        display = None
 
     log.info("Starting  instrument=%s  period=%.0fs  sensors=%s",
              cfg["instrument_id"], cfg["period"], [s.name for s in sensors])
@@ -74,8 +87,15 @@ def main():
                 readings.update(data)
             else:
                 log.warning("[%s] no data", s.name)
+
+        ts = time.strftime("%H:%M:%S")
         if readings:
-            post(cfg["server_url"], cfg["api_key"], cfg["instrument_id"], readings)
+            ok, err = post(cfg["server_url"], cfg["api_key"], cfg["instrument_id"], readings)
+        else:
+            ok, err = False, "NODATA"
+
+        if display:
+            display.update(ts, ok, readings, err)
 
         # 1-second ticks so SIGTERM is handled promptly instead of sleeping the full period
         deadline = time.monotonic() + cfg["period"]

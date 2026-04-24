@@ -36,3 +36,21 @@ class DHT22(Sensor):
             return {"temperature_c": round(float(temp), 2), "humidity_pct": round(float(humi), 2)}
         except Exception as e:
             log.warning("[dht22] %s", e); return {}
+
+
+class LightSensor(Sensor):
+    def __init__(self, channel: int = 0):
+        from grove.adc import ADC  # deferred so sensors.py can be imported on a dev machine
+        self._adc = ADC(address=0x08)
+        self._channel = channel
+        log.info("LightSensor on ADC channel %d", channel)
+
+    @property
+    def name(self): return "light"
+
+    def read(self) -> dict[str, float]:
+        try:
+            val = self._adc.read(self._channel)
+            return {"light_raw": round(float(val), 1)}
+        except Exception as e:
+            log.warning("[light] %s", e); return {}

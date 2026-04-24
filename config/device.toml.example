@@ -6,3 +6,6 @@ period_seconds = 60.0
 
 [sensors.dht22]
 pin = 5
+
+[sensors.light]
+channel = 0  # Grove A0 port
