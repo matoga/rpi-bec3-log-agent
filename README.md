@@ -1,15 +1,90 @@
-# BEC3 RPi Log Agent
+# BEC3 RPi Environment Logger
 
-Reads temperature, humidity (DHT22), and light level (Grove Light Sensor) and posts
-the data to a remote HTTP endpoint on a fixed interval. Status is shown on a Grove LCD RGB Backlight display.
+Continuously reads temperature, humidity, and light level and posts the data
+to a remote server every 60 seconds. Status is shown live on the LCD display.
 
-## Requirements
+---
 
-- Raspberry Pi with Grove Base Hat
-- Python 3.11+
-- [grove.py](https://github.com/Seeed-Studio/grove.py) library
+## Hardware
 
-## Setup
+| Device | Grove port | Notes |
+|---|---|---|
+| DHT22 temp/humidity | D5 | digital |
+| Grove Light Sensor | A0 | analog |
+| Grove LCD RGB Backlight | I2C | address 0x3e / 0x30 |
+| Push button | D22 | hardware pull-down |
+
+---
+
+## LCD display
+
+```
++----------------+
+| 08:30:01 OK   / |   ← line 1: time · status · indicator
+| H24 T26.3 L34   |   ← line 2: sensor readings
++----------------+
+```
+
+### Line 1 — status indicator (last character)
+
+| Char | Meaning |
+|---|---|
+| `W` | Working — reading sensors or sending data |
+| `/ - \ \|` | Idle — spinning once per second, confirms agent is alive |
+
+### Line 1 — send status
+
+| Display | Meaning |
+|---|---|
+| `OK` | Data sent successfully |
+| `F:404` | Server error — HTTP status code shown |
+| `F:CON` | No network or connection refused |
+| `F:TMO` | Server did not respond within 10 s |
+| `F:ND` | No sensor returned any data |
+| `F:ERR` | Unexpected error |
+
+### Line 2 — sensor readings
+
+Only sensors that returned valid data are shown.
+
+| Display | Meaning |
+|---|---|
+| `H24` | Humidity 24 % |
+| `T26.3` | Temperature 26.3 °C |
+| `L34` | Light level (0 = dark, 99 = bright) |
+| `no data` | All sensors failed this cycle |
+
+### Backlight colour
+
+| Colour | Meaning |
+|---|---|
+| White | All sensors OK, data sent |
+| Yellow | At least one sensor missing, data sent |
+| Red | Send failed |
+
+### Button (D22)
+
+Press to trigger an immediate reading and send — resets the 60-second timer.
+
+---
+
+## Service
+
+```bash
+bash install-service.sh   # install, enable, and start
+bash stop-service.sh      # stop and disable
+```
+
+```bash
+sudo systemctl status rpi-bec3-log-agent   # check status
+journalctl -u rpi-bec3-log-agent -f        # follow logs
+```
+
+The agent starts automatically on boot once installed.
+
+---
+
+## First-time setup
 
 ```bash
 # 1. Clone
@@ -25,62 +100,10 @@ pip3 install requests smbus2
 # 4. Configure
 cp config/device.toml.example config/device.toml
 nano config/device.toml   # set server_url and api_key
-```
 
-## Run
-
-```bash
+# 5. Run manually to verify
 python3 agent.py
-```
 
-Logs go to stdout. Stop with Ctrl-C.
-
-## Run as a service (optional)
-
-```bash
+# 6. Install as a service
 bash install-service.sh
 ```
-
-The script auto-detects the repo path and current user, writes the systemd unit
-file, and starts the service immediately.
-
-```bash
-# Check status
-sudo systemctl status rpi-bec3-log-agent
-
-# Follow logs
-journalctl -u rpi-bec3-log-agent -f
-```
-
-## Stop the service
-
-```bash
-bash stop-service.sh
-```
-
-Stops the agent and disables it from starting on boot. Run `install-service.sh` again to re-enable.
-
-## LCD display
-
-Line 1 — send status + spinning liveness indicator (cycles `/` `-` `\` `|`):
-
-```
-08:30:01 OK      /    ← all sensors OK, data sent
-08:30:01 OK      -    ← same, next tick (one sensor missing → yellow backlight)
-08:30:01 F:404   \    ← server returned HTTP 404
-08:30:01 F:CON   |    ← no network / connection refused
-08:30:01 F:TMO   /    ← server did not respond within 10 s
-08:30:01 F:ND    -    ← no sensor returned data at all
-08:30:01 F:ERR   \    ← unexpected error
-```
-
-Line 2 — sensor readings (only present sensors shown):
-
-```
-H24 T26.3 L34         ← humidity %, temperature °C, light 0–99
-T26.3 L34             ← DHT22 failed this cycle
-L34                   ← only light sensor working
-no data               ← nothing working
-```
-
-Backlight colours: **white** = all OK · **yellow** = at least one sensor missing · **red** = send failed

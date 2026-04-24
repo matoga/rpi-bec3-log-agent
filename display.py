@@ -16,7 +16,7 @@ _EXPECTED = {"humidity_pct", "temperature_c", "light_raw"}
 _SPIN = [ord('|'), ord('/'), ord('-'), 0x00]
 
 # 5×8 backslash bitmap for CGRAM slot 0
-_BACKSLASH_ROWS = [0x10, 0x08, 0x04, 0x02, 0x01, 0x00, 0x00, 0x00]
+_BACKSLASH_ROWS = [0x00, 0x10, 0x08, 0x04, 0x02, 0x01, 0x00, 0x00]
 
 
 def _ok(v):
@@ -70,7 +70,7 @@ class Display:
         """Show X at position 15 while reading sensors / posting."""
         try:
             self._bus.write_byte_data(_LCD_ADDR, 0x00, 0x80 | 0x0F)
-            self._bus.write_byte_data(_LCD_ADDR, 0x40, ord('X'))
+            self._bus.write_byte_data(_LCD_ADDR, 0x40, ord('W'))
         except Exception as e:
             log.warning("[lcd] working error: %s", e)
 
