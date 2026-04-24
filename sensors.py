@@ -66,11 +66,12 @@ class PicoScope(Sensor):
     restarted immediately so the next period begins with minimal gap.
     """
 
-    # mV integer → ps2000 range key
+    # mV integer → PS2000_VOLTAGE_RANGE key
+    # NOTE: SDK starts at PS2000_20MV (no 10 mV range on 2204A)
     _RANGE_KEY = {
-        10: "PS2000_10MV",  20: "PS2000_20MV",  50: "PS2000_50MV",
+        20: "PS2000_20MV",   50: "PS2000_50MV",
         100: "PS2000_100MV", 200: "PS2000_200MV", 500: "PS2000_500MV",
-        1000: "PS2000_1V",  2000: "PS2000_2V",  5000: "PS2000_5V",
+        1000: "PS2000_1V",   2000: "PS2000_2V",   5000: "PS2000_5V",
         10000: "PS2000_10V", 20000: "PS2000_20V",
     }
 
@@ -180,10 +181,16 @@ class PicoScope(Sensor):
 
     def _start_streaming(self):
         ps, ctypes = self._ps, self._ctypes
+        # PS2000_NS = 2 by position in make_enum([FS,PS,NS,...])
+        # Use getattr fallback so older picosdk installs (without PS2000_TIME_UNITS) work
+        _time_units = getattr(ps, "PS2000_TIME_UNITS", {}).get("PS2000_NS", 2)
+        interval_ns = max(100, 1_000_000_000 // self._sample_rate_hz)
+        log.debug("[picoscope] run_streaming_ns interval=%dns time_units=%d buf=%d",
+                  interval_ns, _time_units, self._buf_size)
         ps.ps2000_run_streaming_ns(
             self._chandle,
-            max(100, 1_000_000_000 // self._sample_rate_hz),  # sample interval in ns
-            ps.PS2000_TIME_UNITS["PS2000_NS"],
+            interval_ns,
+            _time_units,
             self._buf_size,
             0,   # autoStop = 0 → run forever
             1,   # downSampleRatio
@@ -207,7 +214,22 @@ class PicoScope(Sensor):
                     n = min(int(n_values), buf_size)
                     chunks.append(np.ctypeslib.as_array(buf_ptr, shape=(n,)).copy())
 
-        return self._ps.GetOverviewBuffersType(_cb)  # correct callback factory name
+        # GetOverviewBuffersType added in newer picosdk; fall back to manual ctypes factory
+        cb_factory = getattr(self._ps, "GetOverviewBuffersType", None)
+        if cb_factory is None:
+            from picosdk.ctypes_wrapper import C_CALLBACK_FUNCTION_FACTORY
+            from ctypes import POINTER, c_int16, c_uint32
+            cb_factory = C_CALLBACK_FUNCTION_FACTORY(
+                None,
+                POINTER(POINTER(c_int16)),  # overviewBuffers
+                c_int16,                    # overflow
+                c_uint32,                   # triggerAt
+                c_int16,                    # triggered
+                c_int16,                    # autoStop
+                c_uint32,                   # nValues
+            )
+            log.debug("[picoscope] built GetOverviewBuffersType manually (old picosdk)")
+        return cb_factory(_cb)
 
     # ---------------------------------------------------------- background thread
 
