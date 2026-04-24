@@ -2,7 +2,7 @@
 import logging, os, signal, sys, threading, time, tomllib
 from pathlib import Path
 import requests
-from sensors import DHT22, LightSensor
+from sensors import DHT22, LightSensor, PicoScope
 from display import Display
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%dT%H:%M:%S")
@@ -77,6 +77,18 @@ def main():
         LightSensor(channel=cfg["sensors"].get("light", {}).get("channel", 0)),
     ]
 
+    pico_cfg = cfg["sensors"].get("picoscope", {})
+    if pico_cfg.get("enabled", False):
+        try:
+            sensors.append(PicoScope(
+                channel=pico_cfg.get("channel", "A"),
+                range_mv=int(pico_cfg.get("range_mv", 100)),
+                coupling=pico_cfg.get("coupling", "DC"),
+                sample_rate_hz=int(pico_cfg.get("sample_rate_hz", 10_000)),
+            ))
+        except Exception as e:
+            log.warning("PicoScope unavailable: %s", e)
+
     try:
         display = Display()
     except Exception as e:
@@ -132,6 +144,9 @@ def main():
 
     if gpio_cleanup:
         gpio_cleanup()
+    for s in sensors:
+        if hasattr(s, "close"):
+            s.close()
     log.info("Stopped.")
 
 

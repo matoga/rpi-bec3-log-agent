@@ -12,3 +12,10 @@ channel = 0  # Grove A0 port
 
 [sensors.button]
 pin = 22  # Grove D22 port, hardware pull-down
+
+[sensors.picoscope]
+enabled        = true
+channel        = "A"      # A or B
+range_mv       = 100      # vertical range in mV (100, 200, 500, 1000, 2000, 5000, 10000, 20000)
+coupling       = "DC"     # DC or AC
+sample_rate_hz = 10000    # samples per second streamed from the scope

@@ -9,7 +9,7 @@ _WHITE  = (255, 255, 255)
 _YELLOW = (255, 255,   0)
 _RED    = (255,   0,   0)
 
-_EXPECTED = {"humidity_pct", "temperature_c", "light_raw"}
+_EXPECTED = {"humidity_pct", "temperature_c", "light_raw", "picoscope_ch_a"}
 
 # Spinner as raw byte values.  Slot 0 (0x00) is a custom backslash defined in
 # CGRAM during init — the built-in 0x5C maps to ¥ on HD44780 displays.
@@ -78,6 +78,7 @@ class Display:
         humi  = readings.get("humidity_pct")
         temp  = readings.get("temperature_c")
         light = readings.get("light_raw")
+        pico  = readings.get("picoscope_ch_a")
 
         parts = []
         if _ok(humi):  parts.append(f"H{round(humi):02d}")
@@ -85,6 +86,7 @@ class Display:
         if _ok(light):
             scaled = min(99, int(float(light) * 99 / 1023))
             parts.append(f"L{scaled:02d}")
+        if pico:       parts.append("P")
 
         if ok:
             msg   = f"{ts} OK"
