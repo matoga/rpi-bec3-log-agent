@@ -60,10 +60,8 @@ class LightSensor(Sensor):
 class PicoScope(Sensor):
     """PicoScope 2204A USB oscilloscope — ps2000 driver.
 
-    Configures the device in continuous legacy streaming mode (windowed=1).
-    On read(), ps2000_get_values is called to synchronously grab a snapshot 
-    of the most recent samples. Stats are computed and the waveform is 
-    zlib-compressed and base64-encoded.
+    Configures the device in block mode to read a single sample per read().
+    Stats return the single value, and waveform is empty.
     """
 
     # mV integer → PS2000_VOLTAGE_RANGE key
@@ -89,15 +87,23 @@ class PicoScope(Sensor):
         self._coupling     = coupling
         self._sample_rate_hz = sample_rate_hz
 
+        self._sample_interval_s = 0.1
+
         self._chandle      = ctypes.c_int16()
         self._max_adc      = ctypes.c_int16()
         self._channel_range = None
-        self._buf_size     = 2000   # number of samples to keep in rolling window
         self._running      = True
 
+        self._lock         = threading.Lock()
+        self._buffer       = []
+
         self._open_and_start()
-        log.info("PicoScope ch=%s range=%dmV coupling=%s rate=%dHz (legacy windowed)",
-                 self._channel_str, self._range_mv, self._coupling, self._sample_rate_hz)
+        
+        self._thread = threading.Thread(target=self._sample_loop, daemon=True, name="PicoScope-Sampler")
+        self._thread.start()
+
+        log.info("PicoScope ch=%s range=%dmV coupling=%s (block mode 0.1s bg thread)",
+                 self._channel_str, self._range_mv, self._coupling)
 
     # ------------------------------------------------------------------ helpers
 
@@ -154,80 +160,120 @@ class PicoScope(Sensor):
         log.debug("[picoscope] coupling=%d range_key=%s channel_range=%s",
                   coupling_val, range_key, self._channel_range)
 
+        # Disable all channels first
+        ps.ps2000_set_channel(self._chandle, 0, 0, 0, 0)
+        ps.ps2000_set_channel(self._chandle, 1, 0, 0, 0)
+
+        # Enable only the requested channel
         ps.ps2000_set_channel(
             self._chandle, self._ch_enum(),
             1, coupling_val, self._channel_range,
         )
 
-        # Legacy streaming: interval_ms, max_samples, windowed=1 (continuous)
-        self._interval_ms = max(1, 1000 // self._sample_rate_hz)
-        log.debug("[picoscope] run_streaming interval=%dms max_samples=%d",
-                  self._interval_ms, self._buf_size)
-        
-        ps.ps2000_run_streaming(
-            self._chandle,
-            self._interval_ms,
-            self._buf_size,
-            1,  # windowed = 1
-        )
+        # Block mode setup: disable trigger (5 = PS2000_NONE)
+        ps.ps2000_set_trigger(self._chandle, 5, 0, 0, 0, 100)
 
     # --------------------------------------------------------------- Sensor API
 
     @property
     def name(self): return "picoscope"
 
-    def read(self) -> dict:
-        try:
-            ps, ctypes = self._ps, self._ctypes
+    def _sample_loop(self):
+        ps, ctypes = self._ps, self._ctypes
+        
+        N = 1
+        timebase = 8
+        oversample = ctypes.c_int16(1)
+        
+        bufA = (ctypes.c_int16 * N)()
+        bufB = (ctypes.c_int16 * N)()
+        cmaxSamples = ctypes.c_int32(N)
+
+        while self._running:
+            start_t = time.monotonic()
             
-            buf = (ctypes.c_int16 * self._buf_size)()
-            overflow = ctypes.c_int16(0)
+            timeIndisposed = ctypes.c_int32()
+            ps.ps2000_run_block(self._chandle, N, timebase, oversample, ctypes.byref(timeIndisposed))
+
+            ready = ctypes.c_int16(0)
+            while ready.value == 0 and self._running:
+                ready = ctypes.c_int16(ps.ps2000_ready(self._chandle))
+                if ready.value == 0:
+                    time.sleep(0.005)
+            
+            if not self._running:
+                break
 
             n_values = ps.ps2000_get_values(
                 self._chandle,
-                ctypes.byref(buf),  # buffer_a
-                None,               # buffer_b
-                None,               # buffer_c
-                None,               # buffer_d
-                ctypes.byref(overflow),
-                self._buf_size
+                ctypes.byref(bufA) if self._channel_str == "A" else None,
+                ctypes.byref(bufB) if self._channel_str == "B" else None,
+                None,
+                None,
+                ctypes.byref(oversample),
+                cmaxSamples
             )
 
-            if n_values <= 0:
-                log.warning("[picoscope] get_values returned %d", n_values)
+            if n_values > 0:
+                buf = bufA if self._channel_str == "A" else bufB
+                raw_adc = np.ctypeslib.as_array(buf, shape=(n_values,)).copy()
+                mv_arr  = np.array(
+                    self._adc2mV(raw_adc, self._channel_range, self._max_adc),
+                    dtype=np.float32,
+                )
+                if mv_arr.size > 0:
+                    val = float(mv_arr[0])
+                    ts = time.time()  # precise unix timestamp
+                    with self._lock:
+                        self._buffer.append((ts, val))
+
+            elapsed = time.monotonic() - start_t
+            sleep_t = max(0.0, self._sample_interval_s - elapsed)
+            time.sleep(sleep_t)
+
+    def read(self) -> dict:
+        try:
+            with self._lock:
+                buf = self._buffer
+                self._buffer = []
+
+            n = len(buf)
+            if n == 0:
+                log.warning("[picoscope] no data collected")
                 return {}
 
-            # --- ADC → mV conversion -----------------------------------------
-            raw_adc = np.ctypeslib.as_array(buf, shape=(n_values,)).copy()
-            mv_arr  = np.array(
-                self._adc2mV(raw_adc, self._channel_range, self._max_adc),
-                dtype=np.float32,
-            )
-            if mv_arr.size == 0:
-                return {}
+            start_time_unix = buf[0][0]
+            times_arr = np.array([int(round((pt[0] - start_time_unix) * 1000)) for pt in buf], dtype=np.uint32)
+            mv_arr    = np.array([pt[1] for pt in buf], dtype=np.float32)
 
             # --- statistics --------------------------------------------------
             p5, p95      = float(np.percentile(mv_arr, 5)), float(np.percentile(mv_arr, 95))
             mask         = (mv_arr >= p5) & (mv_arr <= p95)
             trim_mean    = float(np.mean(mv_arr[mask])) if mask.any() else float(np.mean(mv_arr))
 
-            # --- compress waveform -------------------------------------------
-            compressed = zlib.compress(mv_arr.tobytes(), level=6)
-            encoded    = base64.b64encode(compressed).decode("ascii")
+            # --- compress payload -------------------------------------------
+            c_times = zlib.compress(times_arr.tobytes(), level=6)
+            b64_times = base64.b64encode(c_times).decode("ascii")
+
+            mv_arr_pack = mv_arr.astype(np.float16)
+            c_samples = zlib.compress(mv_arr_pack.tobytes(), level=6)
+            b64_samples = base64.b64encode(c_samples).decode("ascii")
 
             log.info("[picoscope] n=%d median=%.3f mean=%.3f trim_mean=%.3f mV",
-                     mv_arr.size, np.median(mv_arr), np.mean(mv_arr), trim_mean)
+                     n, np.median(mv_arr), np.mean(mv_arr), trim_mean)
 
             return {
-                "picoscope_ch_a": {
-                    "n_samples":          int(mv_arr.size),
-                    "sample_interval_ms": int(self._interval_ms),
+                f"picoscope_ch_{self._channel_str.lower()}": {
+                    "start_time_unix":    start_time_unix,
+                    "n_samples":          n,
+                    "sample_interval_ms": int(self._sample_interval_s * 1000),
                     "median_mv":          round(float(np.median(mv_arr)), 4),
                     "mean_mv":            round(float(np.mean(mv_arr)),   4),
                     "trim_mean_mv":       round(trim_mean,                4),
                     "trim_min_mv":        round(p5,                       4),
                     "trim_max_mv":        round(p95,                      4),
-                    "samples_b64z":       encoded,
+                    "timestamps_ms_uint32_b64z": b64_times,
+                    "samples_float16_b64z":      b64_samples,
                 }
             }
         except Exception as e:
@@ -237,6 +283,8 @@ class PicoScope(Sensor):
     def close(self):
         """Graceful shutdown — call on agent exit."""
         self._running = False
+        if hasattr(self, "_thread") and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
         try:
             self._ps.ps2000_stop(self._chandle)
             self._ps.ps2000_close_unit(self._chandle)
