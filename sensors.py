@@ -119,15 +119,43 @@ class PicoScope(Sensor):
     def _open_and_start(self):
         ctypes, ps = self._ctypes, self._ps
 
-        # First call uploads firmware; device re-enumerates, handle will be 0
-        ps.ps2000_open_unit()
-        time.sleep(2)  # wait for firmware upload + re-enumeration
+        # --- diagnostics: show USB state before opening ------------------
+        try:
+            import subprocess
+            usb = subprocess.check_output(["lsusb"], stderr=subprocess.DEVNULL,
+                                          text=True, timeout=5)
+            pico_lines = [l for l in usb.splitlines() if "0ce9" in l.lower() or "pico" in l.lower()]
+            log.debug("[picoscope] lsusb pico entries: %s", pico_lines or "(none)")
+        except Exception as e:
+            log.debug("[picoscope] lsusb unavailable: %s", e)
 
-        # Second call actually opens the unit
-        handle = ps.ps2000_open_unit()
+        # --- open with retry loop ----------------------------------------
+        # On first connection the driver uploads firmware; the device then
+        # re-enumerates (USB VID:PID changes) and ps2000_open_unit returns 0.
+        # On Linux the re-enumeration timing is unpredictable (can be >10 s),
+        # so we retry with a generous backoff rather than a fixed sleep.
+        MAX_ATTEMPTS = 8
+        RETRY_DELAY  = 3.0   # seconds between attempts
+        handle = 0
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            handle = ps.ps2000_open_unit()
+            log.debug("[picoscope] open attempt %d/%d → handle=%d",
+                      attempt, MAX_ATTEMPTS, handle)
+            if handle > 0:
+                break
+            if attempt < MAX_ATTEMPTS:
+                log.info("[picoscope] handle=0 (firmware upload / re-enum?) "
+                         "— retrying in %.0fs (attempt %d/%d)…",
+                         RETRY_DELAY, attempt, MAX_ATTEMPTS)
+                time.sleep(RETRY_DELAY)
+
         if handle <= 0:
-            raise RuntimeError(f"ps2000_open_unit failed, handle={handle}")
+            raise RuntimeError(
+                f"ps2000_open_unit returned handle={handle} after "
+                f"{MAX_ATTEMPTS} attempts ({MAX_ATTEMPTS * RETRY_DELAY:.0f}s)"
+            )
         self._chandle = ctypes.c_int16(handle)
+        log.info("[picoscope] opened, handle=%d", handle)
 
         self._max_adc = ctypes.c_int16(32767)  # ps2000 fixed max ADC value
 
@@ -135,6 +163,8 @@ class PicoScope(Sensor):
         coupling_val = ps.PICO_COUPLING[self._coupling]
         range_key    = self._RANGE_KEY.get(self._range_mv, "PS2000_100MV")
         self._channel_range = ps.PS2000_VOLTAGE_RANGE[range_key]
+        log.debug("[picoscope] coupling=%d range_key=%s channel_range=%s",
+                  coupling_val, range_key, self._channel_range)
 
         ps.ps2000_set_channel(
             self._chandle, self._ch_enum(),
