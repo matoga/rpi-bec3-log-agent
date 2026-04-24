@@ -9,3 +9,6 @@ pin = 5
 
 [sensors.light]
 channel = 0  # Grove A0 port
+
+[sensors.button]
+pin = 22  # Grove D22 port, hardware pull-down

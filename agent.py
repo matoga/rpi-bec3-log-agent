@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import logging, os, signal, sys, time, tomllib
+import logging, os, signal, sys, threading, time, tomllib
 from pathlib import Path
 import requests
 from sensors import DHT22, LightSensor
@@ -30,6 +30,21 @@ def load_config():
     }
 
 
+def _setup_button(pin: int):
+    """Returns (pressed_event, cleanup_fn) or (None, None) if unavailable."""
+    try:
+        import RPi.GPIO as GPIO  # deferred — not available on dev machines
+        pressed = threading.Event()
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(pin, GPIO.IN)  # hardware pull-down — no software pull needed
+        GPIO.add_event_detect(pin, GPIO.RISING, callback=lambda _: pressed.set(), bouncetime=300)
+        log.info("Button on GPIO %d", pin)
+        return pressed, GPIO.cleanup
+    except Exception as e:
+        log.warning("Button unavailable: %s", e)
+        return None, None
+
+
 def post(server_url, api_key, instrument_id, readings):
     """Returns (ok: bool, err_code: str | None)."""
     try:
@@ -47,10 +62,10 @@ def post(server_url, api_key, instrument_id, readings):
         return False, resp.status_code
     except requests.exceptions.ConnectionError as e:
         log.error("✗ Connection: %s", e)
-        return False, "CONN"
+        return False, "CON"
     except requests.exceptions.Timeout:
         log.error("✗ Timeout")
-        return False, "TOUT"
+        return False, "TMO"
 
 
 def main():
@@ -67,6 +82,9 @@ def main():
     except Exception as e:
         log.warning("LCD display unavailable: %s", e)
         display = None
+
+    button_pin = cfg["sensors"].get("button", {}).get("pin", 22)
+    button, gpio_cleanup = _setup_button(button_pin)
 
     log.info("Starting  instrument=%s  period=%.0fs  sensors=%s",
              cfg["instrument_id"], cfg["period"], [s.name for s in sensors])
@@ -92,16 +110,21 @@ def main():
         if readings:
             ok, err = post(cfg["server_url"], cfg["api_key"], cfg["instrument_id"], readings)
         else:
-            ok, err = False, "NODATA"
+            ok, err = False, "ND"
 
         if display:
             display.update(ts, ok, readings, err)
 
-        # 1-second ticks so SIGTERM is handled promptly instead of sleeping the full period
         deadline = time.monotonic() + cfg["period"]
         while running and time.monotonic() < deadline:
-            time.sleep(1)
+            if button and button.is_set():
+                button.clear()
+                log.info("Button pressed — force refresh")
+                break
+            time.sleep(0.1)
 
+    if gpio_cleanup:
+        gpio_cleanup()
     log.info("Stopped.")
 
 

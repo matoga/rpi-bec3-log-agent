@@ -8,6 +8,7 @@ _YELLOW = (255, 255,   0)
 _RED    = (255,   0,   0)
 
 _EXPECTED = {"humidity_pct", "temperature_c", "light_raw"}
+_SPIN = ['/', '-', '\\', '|']
 
 
 def _ok(v):
@@ -23,6 +24,7 @@ class Display:
         self._bus.write_byte_data(_RGB_ADDR, 0x00, 0x07)
         time.sleep(0.01)
         self._bus.write_byte_data(_RGB_ADDR, 0x04, 0x15)
+        self._tick = 0
         log.info("LCD display ready")
 
     def _rgb(self, r, g, b):
@@ -43,18 +45,21 @@ class Display:
             parts.append(f"L{scaled:02d}")
 
         if ok:
-            line1 = f"{ts} Success"
+            msg   = f"{ts} OK"
             color = _WHITE if len(parts) == len(_EXPECTED) else _YELLOW
         else:
             code  = str(err) if err else "ERR"
-            line1 = f"{ts} F:{code}"
+            msg   = f"{ts} F:{code}"
             color = _RED
 
+        spin  = _SPIN[self._tick % 4]
+        self._tick += 1
+        line1 = f"{msg:<14} {spin}"   # msg in 14 chars, 1 space, spinner = 16
         line2 = " ".join(parts) if parts else "no data"
 
         try:
             self._lcd.setCursor(0, 0)
-            self._lcd.write(line1[:16].ljust(16))
+            self._lcd.write(line1)
             self._lcd.setCursor(1, 0)
             self._lcd.write(line2[:16].ljust(16))
             self._rgb(*color)

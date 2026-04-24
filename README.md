@@ -38,13 +38,49 @@ Logs go to stdout. Stop with Ctrl-C.
 ## Run as a service (optional)
 
 ```bash
-sudo cp rpi-bec3-log-agent.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now rpi-bec3-log-agent
+bash install-service.sh
+```
 
-# Logs
+The script auto-detects the repo path and current user, writes the systemd unit
+file, and starts the service immediately.
+
+```bash
+# Check status
+sudo systemctl status rpi-bec3-log-agent
+
+# Follow logs
 journalctl -u rpi-bec3-log-agent -f
 ```
 
-The service file assumes the repo is cloned to `/home/admin/rpi-bec3-log-agent`
-and runs as user `admin`. Edit the service file if your setup differs.
+## Stop the service
+
+```bash
+bash stop-service.sh
+```
+
+Stops the agent and disables it from starting on boot. Run `install-service.sh` again to re-enable.
+
+## LCD display
+
+Line 1 — send status + spinning liveness indicator (cycles `/` `-` `\` `|`):
+
+```
+08:30:01 OK      /    ← all sensors OK, data sent
+08:30:01 OK      -    ← same, next tick (one sensor missing → yellow backlight)
+08:30:01 F:404   \    ← server returned HTTP 404
+08:30:01 F:CON   |    ← no network / connection refused
+08:30:01 F:TMO   /    ← server did not respond within 10 s
+08:30:01 F:ND    -    ← no sensor returned data at all
+08:30:01 F:ERR   \    ← unexpected error
+```
+
+Line 2 — sensor readings (only present sensors shown):
+
+```
+H24 T26.3 L34         ← humidity %, temperature °C, light 0–99
+T26.3 L34             ← DHT22 failed this cycle
+L34                   ← only light sensor working
+no data               ← nothing working
+```
+
+Backlight colours: **white** = all OK · **yellow** = at least one sensor missing · **red** = send failed
