@@ -77,11 +77,8 @@ class PicoScope(Sensor):
                  coupling: str = "DC", sample_rate_hz: int = 10_000):
         import ctypes
         from picosdk.ps2000 import ps2000 as ps  # ps2000 (not ps2000a) for 2204A
-        from picosdk.functions import adc2mV
-
         self._ctypes       = ctypes
         self._ps           = ps
-        self._adc2mV       = adc2mV
         self._channel_str  = channel.upper()
         self._range_mv     = range_mv
         self._coupling     = coupling
@@ -182,16 +179,17 @@ class PicoScope(Sensor):
         ps, ctypes = self._ps, self._ctypes
         
         N = 1
-        timebase = 8
-        oversample = ctypes.c_int16(1)
-        
+        timebase   = 8
+        oversample = ctypes.c_int16(1)  # passed to run_block, never mutated
+        overflow   = ctypes.c_int16(0)  # overrange output from get_values
+
         bufA = (ctypes.c_int16 * N)()
         bufB = (ctypes.c_int16 * N)()
         cmaxSamples = ctypes.c_int32(N)
 
         while self._running:
             start_t = time.monotonic()
-            
+
             timeIndisposed = ctypes.c_int32()
             ps.ps2000_run_block(self._chandle, N, timebase, oversample, ctypes.byref(timeIndisposed))
 
@@ -210,17 +208,14 @@ class PicoScope(Sensor):
                 ctypes.byref(bufB) if self._channel_str == "B" else None,
                 None,
                 None,
-                ctypes.byref(oversample),
+                ctypes.byref(overflow),
                 cmaxSamples
             )
 
             if n_values > 0:
                 buf = bufA if self._channel_str == "A" else bufB
                 raw_adc = np.ctypeslib.as_array(buf, shape=(n_values,)).copy()
-                mv_arr  = np.array(
-                    self._adc2mV(raw_adc, self._channel_range, self._max_adc),
-                    dtype=np.float32,
-                )
+                mv_arr  = raw_adc.astype(np.float32) * (self._range_mv / 32767.0)
                 if mv_arr.size > 0:
                     val = float(mv_arr[0])
                     ts = time.time()  # precise unix timestamp
