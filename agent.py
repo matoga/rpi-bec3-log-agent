@@ -82,11 +82,13 @@ def main():
     pico_cfg = cfg["sensors"].get("picoscope", {})
     if pico_cfg.get("enabled", False):
         try:
+            ch_a = pico_cfg.get("a", {})
+            ch_b = pico_cfg.get("b", {})
             sensors.append(PicoScope(
-                channel=pico_cfg.get("channel", "A"),
-                range_mv=int(pico_cfg.get("range_mv", 100)),
-                coupling=pico_cfg.get("coupling", "DC"),
-                sample_rate_hz=int(pico_cfg.get("sample_rate_hz", 10_000)),
+                range_mv_a=int(ch_a.get("range_mv", 100)),
+                coupling_a=ch_a.get("coupling", "DC"),
+                range_mv_b=int(ch_b.get("range_mv", 100)),
+                coupling_b=ch_b.get("coupling", "DC"),
             ))
         except Exception as e:
             log.warning("PicoScope unavailable: %s", e)
@@ -127,6 +129,11 @@ def main():
         try:
             raw = Path("/sys/class/thermal/thermal_zone0/temp").read_text().strip()
             readings["rpi_cpu_temp_c"] = round(int(raw) / 1000.0, 1)
+        except Exception:
+            pass
+
+        try:
+            readings["rpi_load_15m"] = round(os.getloadavg()[2], 2)
         except Exception:
             pass
 

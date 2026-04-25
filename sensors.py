@@ -73,39 +73,35 @@ class PicoScope(Sensor):
         10000: "PS2000_10V", 20000: "PS2000_20V",
     }
 
-    def __init__(self, channel: str = "A", range_mv: int = 100,
-                 coupling: str = "DC", sample_rate_hz: int = 10_000):
+    def __init__(self, range_mv_a: int = 100, coupling_a: str = "DC",
+                 range_mv_b: int = 100, coupling_b: str = "DC"):
         import ctypes
         from picosdk.ps2000 import ps2000 as ps  # ps2000 (not ps2000a) for 2204A
         self._ctypes       = ctypes
         self._ps           = ps
-        self._channel_str  = channel.upper()
-        self._range_mv     = range_mv
-        self._coupling     = coupling
-        self._sample_rate_hz = sample_rate_hz
+        
+        self._ch_config = {
+            "A": {"range_mv": range_mv_a, "coupling": coupling_a.upper()},
+            "B": {"range_mv": range_mv_b, "coupling": coupling_b.upper()},
+        }
 
         self._sample_interval_s = 0.1
 
         self._chandle      = ctypes.c_int16()
         self._max_adc      = ctypes.c_int16()
-        self._channel_range = None
         self._running      = True
 
         self._lock         = threading.Lock()
-        self._buffer       = []
+        self._buffers      = {"A": [], "B": []}
 
         self._open_and_start()
         
         self._thread = threading.Thread(target=self._sample_loop, daemon=True, name="PicoScope-Sampler")
         self._thread.start()
 
-        log.info("PicoScope ch=%s range=%dmV coupling=%s (block mode 0.1s bg thread)",
-                 self._channel_str, self._range_mv, self._coupling)
+        log.info("PicoScope ch=A,B (block mode 0.1s bg thread)")
 
     # ------------------------------------------------------------------ helpers
-
-    def _ch_enum(self):
-        return self._ps.PS2000_CHANNEL[f"PS2000_CHANNEL_{self._channel_str}"]  # ps2000 enum
 
     def _open_and_start(self):
         ctypes, ps = self._ctypes, self._ps
@@ -150,22 +146,22 @@ class PicoScope(Sensor):
 
         self._max_adc = ctypes.c_int16(32767)  # ps2000 fixed max ADC value
 
-        # SDK exposes coupling as PICO_COUPLING with plain 'AC'/'DC' keys (bool-style)
-        coupling_val = ps.PICO_COUPLING[self._coupling]
-        range_key    = self._RANGE_KEY.get(self._range_mv, "PS2000_100MV")
-        self._channel_range = ps.PS2000_VOLTAGE_RANGE[range_key]
-        log.debug("[picoscope] coupling=%d range_key=%s channel_range=%s",
-                  coupling_val, range_key, self._channel_range)
-
         # Disable all channels first
         ps.ps2000_set_channel(self._chandle, 0, 0, 0, 0)
         ps.ps2000_set_channel(self._chandle, 1, 0, 0, 0)
 
-        # Enable only the requested channel
-        ps.ps2000_set_channel(
-            self._chandle, self._ch_enum(),
-            1, coupling_val, self._channel_range,
-        )
+        # Enable channels
+        for ch in ("A", "B"):
+            cfg = self._ch_config[ch]
+            coupling_val = ps.PICO_COUPLING[cfg["coupling"]]
+            range_key    = self._RANGE_KEY.get(cfg["range_mv"], "PS2000_100MV")
+            ch_range     = ps.PS2000_VOLTAGE_RANGE[range_key]
+            
+            ch_enum = ps.PS2000_CHANNEL[f"PS2000_CHANNEL_{ch}"]
+            ps.ps2000_set_channel(
+                self._chandle, ch_enum,
+                1, coupling_val, ch_range,
+            )
 
         # Block mode setup: disable trigger (5 = PS2000_NONE)
         ps.ps2000_set_trigger(self._chandle, 5, 0, 0, 0, 100)
@@ -204,8 +200,8 @@ class PicoScope(Sensor):
 
             n_values = ps.ps2000_get_values(
                 self._chandle,
-                ctypes.byref(bufA) if self._channel_str == "A" else None,
-                ctypes.byref(bufB) if self._channel_str == "B" else None,
+                ctypes.byref(bufA),
+                ctypes.byref(bufB),
                 None,
                 None,
                 ctypes.byref(overflow),
@@ -213,14 +209,15 @@ class PicoScope(Sensor):
             )
 
             if n_values > 0:
-                buf = bufA if self._channel_str == "A" else bufB
-                raw_adc = np.ctypeslib.as_array(buf, shape=(n_values,)).copy()
-                mv_arr  = raw_adc.astype(np.float32) * (self._range_mv / 32767.0)
-                if mv_arr.size > 0:
-                    val = float(mv_arr[0])
-                    ts = time.time()  # precise unix timestamp
-                    with self._lock:
-                        self._buffer.append((ts, val))
+                ts = time.time()  # precise unix timestamp
+                with self._lock:
+                    for ch, buf in [("A", bufA), ("B", bufB)]:
+                        raw_adc = np.ctypeslib.as_array(buf, shape=(n_values,)).copy()
+                        range_mv = self._ch_config[ch]["range_mv"]
+                        mv_arr  = raw_adc.astype(np.float32) * (range_mv / 32767.0)
+                        if mv_arr.size > 0:
+                            val = float(mv_arr[0])
+                            self._buffers[ch].append((ts, val))
 
             elapsed = time.monotonic() - start_t
             sleep_t = max(0.0, self._sample_interval_s - elapsed)
@@ -229,36 +226,38 @@ class PicoScope(Sensor):
     def read(self) -> dict:
         try:
             with self._lock:
-                buf = self._buffer
-                self._buffer = []
+                bufs = self._buffers
+                self._buffers = {"A": [], "B": []}
 
-            n = len(buf)
-            if n == 0:
-                log.warning("[picoscope] no data collected")
-                return {}
+            result = {}
+            for ch in ("A", "B"):
+                buf = bufs.get(ch, [])
+                n = len(buf)
+                if n == 0:
+                    log.warning("[picoscope] no data collected for ch %s", ch)
+                    continue
 
-            start_time_unix = buf[0][0]
-            times_arr = np.array([int(round((pt[0] - start_time_unix) * 1000)) for pt in buf], dtype=np.uint32)
-            mv_arr    = np.array([pt[1] for pt in buf], dtype=np.float32)
+                start_time_unix = buf[0][0]
+                times_arr = np.array([int(round((pt[0] - start_time_unix) * 1000)) for pt in buf], dtype=np.uint32)
+                mv_arr    = np.array([pt[1] for pt in buf], dtype=np.float32)
 
-            # --- statistics --------------------------------------------------
-            p5, p95      = float(np.percentile(mv_arr, 5)), float(np.percentile(mv_arr, 95))
-            mask         = (mv_arr >= p5) & (mv_arr <= p95)
-            trim_mean    = float(np.mean(mv_arr[mask])) if mask.any() else float(np.mean(mv_arr))
+                # --- statistics --------------------------------------------------
+                p5, p95      = float(np.percentile(mv_arr, 5)), float(np.percentile(mv_arr, 95))
+                mask         = (mv_arr >= p5) & (mv_arr <= p95)
+                trim_mean    = float(np.mean(mv_arr[mask])) if mask.any() else float(np.mean(mv_arr))
 
-            # --- compress payload -------------------------------------------
-            c_times = zlib.compress(times_arr.tobytes(), level=6)
-            b64_times = base64.b64encode(c_times).decode("ascii")
+                # --- compress payload -------------------------------------------
+                c_times = zlib.compress(times_arr.tobytes(), level=6)
+                b64_times = base64.b64encode(c_times).decode("ascii")
 
-            mv_arr_pack = mv_arr.astype(np.float16)
-            c_samples = zlib.compress(mv_arr_pack.tobytes(), level=6)
-            b64_samples = base64.b64encode(c_samples).decode("ascii")
+                mv_arr_pack = mv_arr.astype(np.float16)
+                c_samples = zlib.compress(mv_arr_pack.tobytes(), level=6)
+                b64_samples = base64.b64encode(c_samples).decode("ascii")
 
-            log.info("[picoscope] n=%d median=%.3f mean=%.3f trim_mean=%.3f mV",
-                     n, np.median(mv_arr), np.mean(mv_arr), trim_mean)
+                log.info("[picoscope] ch=%s n=%d median=%.3f mean=%.3f trim_mean=%.3f mV",
+                         ch, n, np.median(mv_arr), np.mean(mv_arr), trim_mean)
 
-            return {
-                f"picoscope_ch_{self._channel_str.lower()}": {
+                result[f"picoscope_ch_{ch.lower()}"] = {
                     "start_time_unix":    start_time_unix,
                     "n_samples":          n,
                     "sample_interval_ms": int(self._sample_interval_s * 1000),
@@ -270,7 +269,7 @@ class PicoScope(Sensor):
                     "timestamps_ms_uint32_b64z": b64_times,
                     "samples_float16_b64z":      b64_samples,
                 }
-            }
+            return result
         except Exception as e:
             log.warning("[picoscope] read error: %s", e)
             return {}
